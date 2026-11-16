@@ -1,0 +1,31 @@
+import socket
+import hmac
+import hashlib
+
+IP = "10.45.0.3"
+PORT = 2404
+KEY = b"5G_SECURE_KEY"
+
+sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+sock.bind((IP, PORT))
+
+print("[MTU] Running...")
+
+while True:
+    packet, addr = sock.recvfrom(1024)
+
+    print("[MTU] RX:", packet)
+
+    if b"|SIG|" in packet:
+        data, sig = packet.split(b"|SIG|")
+        expected = hmac.new(KEY, data, hashlib.sha256).digest()
+
+        if hmac.compare_digest(sig, expected):
+            print("[MTU] OK integrity")
+            sock.sendto(b"ACK_SECURE", addr)
+        else:
+            print("[MTU] FAIL integrity")
+            sock.sendto(b"ACK_REJECT", addr)
+    else:
+        print("[MTU] OPEN mode")
+        sock.sendto(b"ACK_OPEN", addr)

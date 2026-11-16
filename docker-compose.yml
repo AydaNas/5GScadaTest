@@ -1,0 +1,8 @@
+version: '3.8'
+services:
+  5g-upf:
+    build: .
+    container_name: 5g-core
+    privileged: true
+    network_mode: "host"
+    entrypoint: /bin/bash -c "tail -f /dev/null"
